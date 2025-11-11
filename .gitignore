@@ -1,0 +1,33 @@
+# ROS2 build files
+build/
+install/
+log/
+*.pyc
+__pycache__/
+*.so
+*.a
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+*.o
+*.d
+cmake-build-*/
+
+# Python
+*.py[cod]
+*.egg-info/
+dist/
+
+# Logs
+*.log
+

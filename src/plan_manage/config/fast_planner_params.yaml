@@ -1,0 +1,81 @@
+fast_planner_node:
+  ros__parameters:
+    manager.max_vel: 1.5
+    manager.max_acc: 3.0
+    manager.max_jerk: 6.0
+    manager.dynamic_environment: 0
+    manager.clearance_threshold: 0.2  # Match Fast-Planner default
+    manager.local_segment_length: 6.0  # Match Fast-Planner default
+    manager.control_points_distance: 0.5  # Match Fast-Planner default
+    manager.use_geometric_path: false
+    manager.use_kinodynamic_path: true
+    manager.use_topo_path: false
+    manager.use_optimization: true
+
+    search/max_tau: 0.6
+    search/init_max_tau: 0.8
+    search/max_vel: 3.0
+    search/max_acc: 2.0
+    search/w_time: 10.0
+    search/horizon: 7.0
+    search/resolution_astar: 0.1  # Match Fast-Planner default
+    search/time_resolution: 0.8
+    search/lambda_heu: 5.0
+    search/allocate_num: 100000
+    search/check_num: 5
+    search/optimistic: true
+    search/vel_margin: 0.0
+
+    # Optimization parameters matching Fast-Planner defaults (kino_algorithm.xml)
+    optimization.lambda1: 10.0  # Smoothness weight (jerk)
+    optimization.lambda2: 5.0   # Distance weight
+    optimization.lambda3: 0.00001  # Feasibility weight (very small!)
+    optimization.lambda4: 0.01   # Endpoint weight
+    optimization.lambda5: 0.0    # Guide weight (not used in NORMAL_PHASE)
+    optimization.lambda6: 0.0    # Visibility weight
+    optimization.lambda7: 100.0  # Waypoints weight (for yaw planning)
+    optimization.lambda8: 0.0    # Acceleration smoothness weight
+    optimization.dist0: 0.4     # Safe distance
+    optimization.max_vel: 2.0    # Max velocity (should match manager.max_vel)
+    optimization.max_acc: 3.0    # Max acceleration (should match manager.max_acc)
+    optimization.visib_min: 0.3  # Visibility minimum
+    optimization.dlmin: 0.05    # Minimum distance
+    optimization.wnl: 0.0       # Waypoint weight
+    # Iteration numbers: phase 1 is very short (2), phase 2-4 are longer
+    optimization.max_iteration_num1: 2     # Guide phase (very short)
+    optimization.max_iteration_num2: 300   # Normal phase (long)
+    optimization.max_iteration_num3: 200   # Normal phase continuation
+    optimization.max_iteration_num4: 200   # Normal phase continuation
+    # Iteration times: phase 1 is very short, phase 2-4 are longer
+    optimization.max_iteration_time1: 0.0001  # Guide phase (very short)
+    optimization.max_iteration_time2: 0.005   # Normal phase
+    optimization.max_iteration_time3: 0.003   # Normal phase
+    optimization.max_iteration_time4: 0.003   # Normal phase
+    optimization.algorithm1: 15  # NLOPT_LD_MMA (quadratic cost)
+    optimization.algorithm2: 11  # NLOPT_LD_LBFGS (general cost)
+    optimization.order: 3        # B-spline order
+
+    fsm.target_type: 2
+    fsm.thresh_replan: 1.0
+    fsm.thresh_no_replan: 0.05
+    fsm.waypoint_num: 3
+    # 可选：全局目标yaw角（弧度），如果不设置则自动计算
+    fsm.end_yaw: 0.0
+    fsm.waypoint0.x: 1.0
+    fsm.waypoint0.y: 0.5
+    fsm.waypoint0.z: 0.0  # 平面机器人：Z坐标固定为0
+    fsm.waypoint0.yaw: 0.0  # 可选：每个waypoint的yaw角
+    fsm.waypoint1.x: 2.0
+    fsm.waypoint1.y: 3.0
+    fsm.waypoint1.z: 0.0  # 平面机器人：Z坐标固定为0
+    fsm.waypoint1.yaw: 1.57
+    fsm.waypoint2.x: 0.5
+    fsm.waypoint2.y: 2.0
+    fsm.waypoint2.z: 0.0  # 平面机器人：Z坐标固定为0
+    fsm.waypoint2.yaw: 3.14
+
+traj_server:
+  ros__parameters:
+    controller.kp: 4.0
+    controller.kd: 1.5
+    publish_rate: 100.0
