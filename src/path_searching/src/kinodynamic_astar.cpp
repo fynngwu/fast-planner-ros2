@@ -24,15 +24,12 @@
 #include <path_searching/kinodynamic_astar.h>
 #include <sstream>
 #include <plan_env/sdf_node.hpp>
-#include <rclcpp/clock.hpp>
 
 using namespace std;
 using namespace Eigen;
 
 namespace fast_planner
 {
-// 静态变量用于日志频率控制
-static rclcpp::Clock g_clock(RCL_SYSTEM_TIME);
 KinodynamicAstar::~KinodynamicAstar()
 {
   for (int i = 0; i < allocate_num_; i++)
@@ -46,18 +43,6 @@ int KinodynamicAstar::search(Eigen::Vector3d start_pt, Eigen::Vector3d start_v, 
 {
   start_vel_ = start_v;
   start_acc_ = start_a;
-
-  // Diagnostic: check start and goal
-  double dist = (start_pt - end_pt).norm();
-  if (init && dist < 0.3) {
-    int start_occ = edt_environment_->sdf_map_->getInflateOccupancy(start_pt);
-    int goal_occ = edt_environment_->sdf_map_->getInflateOccupancy(end_pt);
-    RCLCPP_INFO_THROTTLE(rclcpp::get_logger("kinodynamic_astar"), g_clock, 1000,
-                         "Search start. Distance: %.3f, Start_occ: %d, Goal_occ: %d, Start: [%.2f, %.2f, %.2f], Goal: [%.2f, %.2f, %.2f]",
-                         dist, start_occ, goal_occ,
-                         start_pt(0), start_pt(1), start_pt(2),
-                         end_pt(0), end_pt(1), end_pt(2));
-  }
 
   PathNodePtr cur_node = path_node_pool_[0];
   cur_node->parent = NULL;
@@ -92,7 +77,7 @@ int KinodynamicAstar::search(Eigen::Vector3d start_pt, Eigen::Vector3d start_v, 
   PathNodePtr neighbor = NULL;
   PathNodePtr terminate_node = NULL;
   bool init_search = init;
-  const int tolerance = ceil(1 / resolution_);
+  const int tolerance = 3;
 
   while (!open_set_.empty())
   {
@@ -114,15 +99,7 @@ int KinodynamicAstar::search(Eigen::Vector3d start_pt, Eigen::Vector3d start_v, 
         estimateHeuristic(cur_node->state, end_state, time_to_goal);
         computeShotTraj(cur_node->state, end_state, time_to_goal);
         if (init_search)
-        {
-          Vector3d start_pos = cur_node->state.head(3);
-          Vector3d end_pos = end_state.head(3);
-          double dist = (start_pos - end_pos).norm();
-          RCLCPP_ERROR_THROTTLE(rclcpp::get_logger("kinodynamic_astar"), g_clock, 1000,
-                                "Shot in first search loop! Start: [%.2f, %.2f, %.2f], Goal: [%.2f, %.2f, %.2f], Distance: %.3f, Shot success: %d",
-                                start_pos(0), start_pos(1), start_pos(2),
-                                end_pos(0), end_pos(1), end_pos(2), dist, is_shot_succ_);
-        }
+          RCLCPP_ERROR(rclcpp::get_logger("kinodynamic_astar"), "Shot in first search loop!");
       }
     }
     if (reach_horizon)
@@ -153,13 +130,7 @@ int KinodynamicAstar::search(Eigen::Vector3d start_pt, Eigen::Vector3d start_v, 
       }
       else
       {
-        Vector3d start_pos = cur_node->state.head(3);
-        Vector3d end_pos = end_state.head(3);
-        double dist = (start_pos - end_pos).norm();
-        RCLCPP_WARN_THROTTLE(rclcpp::get_logger("kinodynamic_astar"), g_clock, 1000,
-                             "No path: Start=Goal. Start: [%.2f, %.2f, %.2f], Goal: [%.2f, %.2f, %.2f], Distance: %.3f",
-                             start_pos(0), start_pos(1), start_pos(2),
-                             end_pos(0), end_pos(1), end_pos(2), dist);
+        std::cout << "no path" << std::endl;
         return NO_PATH;
       }
     }
@@ -187,9 +158,9 @@ int KinodynamicAstar::search(Eigen::Vector3d start_pt, Eigen::Vector3d start_v, 
     {
       for (double ax = -max_acc_; ax <= max_acc_ + 1e-3; ax += max_acc_ * res)
         for (double ay = -max_acc_; ay <= max_acc_ + 1e-3; ay += max_acc_ * res)
-          for (double az = -max_acc_; az <= max_acc_ + 1e-3; az += max_acc_ * res)
+          // for (double az = -max_acc_; az <= max_acc_ + 1e-3; az += max_acc_ * res)
           {
-            um << ax, ay, az;
+            um << ax, ay, 0.0;
             inputs.push_back(um);
           }
       for (double tau = time_res * max_tau_; tau <= max_tau_; tau += time_res * max_tau_)
@@ -344,13 +315,9 @@ int KinodynamicAstar::search(Eigen::Vector3d start_pt, Eigen::Vector3d start_v, 
     // init_search = false;
   }
 
-  Vector3d start_pos = start_pt;
-  Vector3d end_pos = end_pt;
-  double path_dist = (start_pos - end_pos).norm();
-  RCLCPP_WARN_THROTTLE(rclcpp::get_logger("kinodynamic_astar"), g_clock, 1000,
-                       "Open set empty, no path! Start: [%.2f, %.2f, %.2f], Goal: [%.2f, %.2f, %.2f], Distance: %.3f, Used nodes: %d, Iterations: %d",
-                       start_pos(0), start_pos(1), start_pos(2),
-                       end_pos(0), end_pos(1), end_pos(2), path_dist, use_node_num_, iter_num_);
+  cout << "open set empty, no path!" << endl;
+  cout << "use node num: " << use_node_num_ << endl;
+  cout << "iter num: " << iter_num_ << endl;
   return NO_PATH;
 }
 
@@ -447,14 +414,6 @@ bool KinodynamicAstar::computeShotTraj(Eigen::VectorXd state1, Eigen::VectorXd s
   const Vector3d v1 = state2.segment(3, 3);
   const Vector3d dv = v1 - v0;
   double t_d = time_to_goal;
-  
-  // Check if too close
-  if (dp.norm() < 1e-3) {
-    RCLCPP_WARN_THROTTLE(rclcpp::get_logger("kinodynamic_astar"), g_clock, 1000,
-                         "Shot traj: Start and goal too close! Distance: %.6f", dp.norm());
-    return false;
-  }
-  
   MatrixXd coef(3, 4);
   end_vel_ = v1;
 
@@ -499,10 +458,6 @@ bool KinodynamicAstar::computeShotTraj(Eigen::VectorXd state1, Eigen::VectorXd s
     if (coord(0) < origin_(0) || coord(0) >= map_size_3d_(0) || coord(1) < origin_(1) || coord(1) >= map_size_3d_(1) ||
         coord(2) < origin_(2) || coord(2) >= map_size_3d_(2))
     {
-      RCLCPP_WARN_THROTTLE(rclcpp::get_logger("kinodynamic_astar"), g_clock, 1000,
-                           "Shot traj: Point outside map! Coord: [%.2f, %.2f, %.2f], Map bounds: [%.2f-%.2f, %.2f-%.2f, %.2f-%.2f]",
-                           coord(0), coord(1), coord(2),
-                           origin_(0), map_size_3d_(0), origin_(1), map_size_3d_(1), origin_(2), map_size_3d_(2));
       return false;
     }
 
@@ -511,9 +466,6 @@ bool KinodynamicAstar::computeShotTraj(Eigen::VectorXd state1, Eigen::VectorXd s
     // }
     if (edt_environment_->sdf_map_->getInflateOccupancy(coord) == 1)
     {
-      RCLCPP_WARN_THROTTLE(rclcpp::get_logger("kinodynamic_astar"), g_clock, 1000,
-                           "Shot traj: Point in obstacle! Coord: [%.2f, %.2f, %.2f], Time: %.3f/%.3f",
-                           coord(0), coord(1), coord(2), time, t_d);
       return false;
     }
   }

@@ -19,16 +19,7 @@ def generate_launch_description():
         output='screen'
     )
     
-    # Odom Publisher Node
-    odom_publisher = Node(
-        package='plan_env',
-        executable='odom_publisher',
-        name='odom_publisher',
-        output='screen'
-    )
-    
     return LaunchDescription([
         sdf_node,
-        odom_publisher,
     ])
 

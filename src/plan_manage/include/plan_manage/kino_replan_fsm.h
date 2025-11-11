@@ -29,8 +29,8 @@
 #include <array>
 #include <iostream>
 #include <memory>
+#include <geometry_msgs/msg/pose_stamped.hpp>
 #include <nav_msgs/msg/odometry.hpp>
-#include <nav_msgs/msg/path.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <std_msgs/msg/empty.hpp>
 #include <visualization_msgs/msg/marker.hpp>
@@ -50,17 +50,12 @@ namespace fast_planner {
 class KinoReplanFSM {
 private:
   enum FSM_EXEC_STATE { INIT, WAIT_TARGET, GEN_NEW_TRAJ, REPLAN_TRAJ, EXEC_TRAJ, REPLAN_NEW };
-  enum TARGET_TYPE { MANUAL_TARGET = 1, PRESET_TARGET = 2, REFENCE_PATH = 3 };
-
   FastPlannerManager::Ptr      planner_manager_;
   PlanningVisualization::Ptr   visualization_;
   rclcpp::Node::SharedPtr      node_;
 
-  int    target_type_ = PRESET_TARGET;
   double no_replan_thresh_{};
   double replan_thresh_{};
-  double waypoints_[50][3];
-  int    waypoint_num_{};
   double end_yaw_{0.0};  // 添加目标yaw角
 
   bool           trigger_{false};
@@ -73,11 +68,10 @@ private:
   Eigen::Quaterniond  odom_orient_;
   Eigen::Vector3d     start_pt_, start_vel_, start_acc_, start_yaw_;
   Eigen::Vector3d     end_pt_, end_vel_;
-  int                 current_wp_{0};
 
   rclcpp::TimerBase::SharedPtr exec_timer_;
   rclcpp::TimerBase::SharedPtr safety_timer_;
-  rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr waypoint_sub_;
+  rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr goal_sub_;
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
   rclcpp::Publisher<std_msgs::msg::Empty>::SharedPtr        replan_pub_;
   rclcpp::Publisher<std_msgs::msg::Empty>::SharedPtr        new_pub_;
@@ -89,7 +83,7 @@ private:
 
   void execFSMCallback();
   void checkCollisionCallback();
-  void waypointCallback(const nav_msgs::msg::Path::SharedPtr msg);
+  void goalPoseCallback(const geometry_msgs::msg::PoseStamped::SharedPtr msg);
   void odometryCallback(const nav_msgs::msg::Odometry::SharedPtr msg);
 
 public:

@@ -1,13 +1,14 @@
 #include "plan_env/sdf_node.hpp"
 #include <cmath>
 #include <chrono>
+#include <algorithm>
 
 SdfNode::SdfNode() : Node("sdf_node"), map_initialized_(false) {
     RCLCPP_INFO(this->get_logger(), "Creating SdfNode");
     
     // Declare parameters - matching map1 config
-    this->declare_parameter<double>("resolution", 0.1);  // ESDF resolution: match grid resolution for full detail
-    this->declare_parameter<double>("map_size_x", 3.2);
+    this->declare_parameter<double>("resolution", 0.05);  // ESDF resolution: match grid resolution for full detail
+    this->declare_parameter<double>("map_size_x", 12.0);
     this->declare_parameter<double>("map_size_y", 6.0);
     this->declare_parameter<double>("map_size_z", 0.01);  // Back to 2D (single layer) for faster processing
     this->declare_parameter<double>("obstacles_inflation", 0.1);
@@ -58,7 +59,6 @@ SdfNode::SdfNode() : Node("sdf_node"), map_initialized_(false) {
     // Initialize data buffers
     int buffer_size = mp_.map_voxel_num_(0) * mp_.map_voxel_num_(1) * mp_.map_voxel_num_(2);
     
-    md_.occupancy_buffer_ = std::vector<double>(buffer_size, 0.0);
     md_.occupancy_buffer_neg = std::vector<char>(buffer_size, 0);
     md_.occupancy_buffer_inflate_ = std::vector<char>(buffer_size, 0);
     
@@ -70,27 +70,34 @@ SdfNode::SdfNode() : Node("sdf_node"), map_initialized_(false) {
     md_.tmp_buffer2_ = std::vector<double>(buffer_size, 0.0);
     
     // Initialize local bounds (start with full map)
-    md_.local_bound_min_ = Eigen::Vector3i::Zero();
-    md_.local_bound_max_ = mp_.map_voxel_num_ - Eigen::Vector3i::Ones();
-    
+    md_.local_bound_min_ = mp_.map_min_idx_;
+    md_.local_bound_max_ = mp_.map_max_idx_;
+    md_.map1_grid_ = nullptr;
+    md_.map3_grid_ = nullptr;
+    md_.camera_pos_ = Eigen::Vector3d::Zero();
+    md_.has_odom_ = false;
     md_.esdf_need_update_ = false;
-    md_.local_updated_ = false;
-    md_.occ_need_update_ = false;
-    md_.camera_pos_ = Eigen::Vector3d(0.0, 0.0, mp_.ground_height_);  // Initialize at origin
-    md_.latest_grid_ = nullptr;
     
     // Initialize local update range - will be used when processing grid
     mp_.local_update_range_ = Eigen::Vector3d(local_range_x, local_range_y, local_range_z);
     
-    RCLCPP_INFO(this->get_logger(), "Local update enabled: true, Range: %.2fx%.2fx%.2f", 
-        local_range_x, local_range_y, local_range_z);
+    RCLCPP_INFO(this->get_logger(), "Static map mode enabled, map voxels: [%d, %d, %d]",
+        mp_.map_voxel_num_(0), mp_.map_voxel_num_(1), mp_.map_voxel_num_(2));
     
     // Subscribers and Publishers
-    occupancy_grid_sub_ = this->create_subscription<nav_msgs::msg::OccupancyGrid>(
-        "/map1", 10,
-        std::bind(&SdfNode::occupancyGridCallback, this, std::placeholders::_1));
+    rclcpp::QoS map_qos(rclcpp::KeepLast(1));
+    map_qos.reliable();
+    map_qos.transient_local();
     
-    // Odom subscriber for camera position
+    occupancy_grid_sub_map1_ = this->create_subscription<nav_msgs::msg::OccupancyGrid>(
+        "/map1", map_qos,
+        [this](const nav_msgs::msg::OccupancyGrid::SharedPtr msg) { this->occupancyGridCallback(msg, 1); });
+    
+    occupancy_grid_sub_map3_ = this->create_subscription<nav_msgs::msg::OccupancyGrid>(
+        "/map3", map_qos,
+        [this](const nav_msgs::msg::OccupancyGrid::SharedPtr msg) { this->occupancyGridCallback(msg, 3); });
+    
+    // Odom subscriber retained for compatibility
     odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
         "/odom_world", 10,
         std::bind(&SdfNode::odomCallback, this, std::placeholders::_1));
@@ -98,36 +105,33 @@ SdfNode::SdfNode() : Node("sdf_node"), map_initialized_(false) {
     esdf_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/sdf_map/esdf", 10);
     map_inflate_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/sdf_map/inflate", 10);
     
-    // Timers
-    esdf_timer_ = this->create_wall_timer(
-        std::chrono::milliseconds(100),  // 10Hz update
-        std::bind(&SdfNode::updateEsdfTimer, this));
-    
-    occ_timer_ = this->create_wall_timer(
-        std::chrono::milliseconds(100),  // 10Hz update
-        std::bind(&SdfNode::updateOccupancyCallback, this));
-    
     vis_timer_ = this->create_wall_timer(
-        std::chrono::milliseconds(50),
+        std::chrono::milliseconds(500),
         [this]() {
             this->publishESDF();
             this->publishMapInflate(false);
         });
+    esdf_timer_ = this->create_wall_timer(
+        std::chrono::milliseconds(100),  // 10Hz update
+        std::bind(&SdfNode::updateEsdfTimer, this));
     
     RCLCPP_INFO(this->get_logger(), "SdfNode initialized");
 }
 
-void SdfNode::occupancyGridCallback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg) {
-    if (!map_initialized_) {
-        map_initialized_ = true;
-        RCLCPP_INFO(this->get_logger(), "Received first occupancy grid");
+void SdfNode::occupancyGridCallback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg, int map_index) {
+    if (map_index == 1) {
+        md_.map1_grid_ = msg;
+        RCLCPP_INFO(this->get_logger(), "Received /map1 occupancy grid");
+    } else if (map_index == 3) {
+        md_.map3_grid_ = msg;
+        RCLCPP_INFO(this->get_logger(), "Received /map3 occupancy grid");
+    } else {
+        RCLCPP_WARN(this->get_logger(), "Received occupancy grid with unknown index: %d", map_index);
+        return;
     }
     
-    // Save the occupancy grid to buffer
-    md_.latest_grid_ = msg;
-    if (md_.has_odom_) {
-    md_.occ_need_update_ = true;
-    }
+    rebuildStaticMap();
+    md_.esdf_need_update_ = true;
 }
 
 void SdfNode::odomCallback(const nav_msgs::msg::Odometry::SharedPtr msg) {
@@ -276,22 +280,104 @@ void SdfNode::updateEsdfTimer() {
             first_log = false;
         }
         return;
-    }   
-
-    
+    }
     
     auto start_time = std::chrono::high_resolution_clock::now();
     updateESDF3d();
     auto end_time = std::chrono::high_resolution_clock::now();
-    
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
     RCLCPP_INFO(this->get_logger(), "ESDF update took %ld ms", duration.count());
     
     md_.esdf_need_update_ = false;
-    md_.local_updated_ = false;
-    
+
 }
 
+void SdfNode::rebuildStaticMap() {
+    if (!md_.map1_grid_ && !md_.map3_grid_) {
+        RCLCPP_WARN(this->get_logger(), "Waiting for occupancy grids before rebuilding static map.");
+        return;
+    }
+    
+    md_.local_bound_min_ = mp_.map_min_idx_;
+    md_.local_bound_max_ = mp_.map_max_idx_;
+    
+    map_initialized_ = false;
+    
+    if (md_.map1_grid_) {
+        inflateFromGrid(*md_.map1_grid_);
+    }
+    if (md_.map3_grid_) {
+        inflateFromGrid(*md_.map3_grid_);
+        RCLCPP_INFO(this->get_logger(), "Inflated map3");
+    }
+    
+    md_.esdf_need_update_ = true;
+    map_initialized_ = true;
+}
+
+void SdfNode::inflateFromGrid(const nav_msgs::msg::OccupancyGrid& grid) {
+    const int width = static_cast<int>(grid.info.width);
+    const int height = static_cast<int>(grid.info.height);
+    if (width <= 0 || height <= 0) {
+        RCLCPP_WARN(this->get_logger(), "Received occupancy grid with invalid dimensions.");
+        return;
+    }
+    
+    const double grid_res = grid.info.resolution;
+    const double origin_x = grid.info.origin.position.x;
+    const double origin_y = grid.info.origin.position.y;
+    const auto& data = grid.data;
+    
+    const int inf_step = std::max(0, static_cast<int>(std::ceil(mp_.obstacles_inflation_ / mp_.resolution_)));
+    const int footprint_size = (2 * inf_step + 1) * (2 * inf_step + 1);
+    std::vector<Eigen::Vector3i> inf_pts(footprint_size);
+    
+    const int buffer_size = static_cast<int>(md_.occupancy_buffer_inflate_.size());
+    
+    Eigen::Vector3d range_min(origin_x, origin_y, 0.0);
+    Eigen::Vector3d range_max(
+        origin_x + width * grid_res,
+        origin_y + height * grid_res,
+        0.0);
+    
+    Eigen::Vector3i min_idx, max_idx;
+    posToIndex(range_min, min_idx);
+    posToIndex(range_max, max_idx);
+    boundIndex(min_idx);
+    boundIndex(max_idx);
+    
+    RCLCPP_INFO(this->get_logger(), "Inflating from grid: min_idx = [%d, %d, %d], max_idx = [%d, %d, %d]",
+        min_idx.x(), min_idx.y(), min_idx.z(), max_idx.x(), max_idx.y(), max_idx.z());
+    
+    for (int x = min_idx.x(); x <= max_idx.x(); ++x) {
+        for (int y = min_idx.y(); y <= max_idx.y(); ++y) {
+            Eigen::Vector3d pos;
+            indexToPos(Eigen::Vector3i(x, y, 0), pos);
+            
+            int grid_x = static_cast<int>(std::floor((pos.x() - origin_x) / grid_res));
+            int grid_y = static_cast<int>(std::floor((pos.y() - origin_y) / grid_res));
+            
+            // 添加边界检查，确保 grid_x 和 grid_y 在有效范围内
+            if (grid_x < 0 || grid_x >= width || grid_y < 0 || grid_y >= height) {
+                continue;
+            }
+            
+            int grid_idx = grid_y * width + grid_x;
+            
+            if (data[grid_idx] > 50) {
+                Eigen::Vector3i center(x, y, 0);
+                inflatePoint(center, inf_step, inf_pts);
+                for (const auto& inf_pt : inf_pts) {
+                    int idx_inf = toAddress(inf_pt);
+                    if (idx_inf < 0 || idx_inf >= buffer_size) {
+                        continue;
+                    }
+                    md_.occupancy_buffer_inflate_[idx_inf] = 1;
+                }
+            }
+        }
+    }
+}
 
 void SdfNode::resetBuffer() {
     resetBuffer(mp_.map_min_boundary_, mp_.map_max_boundary_);
@@ -324,8 +410,8 @@ void SdfNode::publishESDF() {
     const double max_dist = 3.0;
     
     // Use the update bounds
-    Eigen::Vector3i min_cut = md_.local_bound_min_;
-    Eigen::Vector3i max_cut = md_.local_bound_max_;
+    Eigen::Vector3i min_cut = mp_.map_min_idx_;
+    Eigen::Vector3i max_cut = mp_.map_max_idx_;
     boundIndex(min_cut);
     boundIndex(max_cut);
     
@@ -387,19 +473,13 @@ void SdfNode::publishESDF() {
     esdf_pub_->publish(cloud_msg);
 }
 
-void SdfNode::publishMapInflate(bool all_info) {
+void SdfNode::publishMapInflate(bool /*all_info*/) {
     if (!map_initialized_) return;
     
     std::vector<float> xs, ys, zs;
     
-    Eigen::Vector3i min_cut = md_.local_bound_min_;
-    Eigen::Vector3i max_cut = md_.local_bound_max_;
-    
-    if (all_info) {
-        int lmm = mp_.local_map_margin_;
-        min_cut -= Eigen::Vector3i(lmm, lmm, lmm);
-        max_cut += Eigen::Vector3i(lmm, lmm, lmm);
-    }
+    Eigen::Vector3i min_cut = mp_.map_min_idx_;
+    Eigen::Vector3i max_cut = mp_.map_max_idx_;
     
     boundIndex(min_cut);
     boundIndex(max_cut);
@@ -450,187 +530,6 @@ void SdfNode::publishMapInflate(bool all_info) {
     map_inflate_pub_->publish(cloud_msg);
 }
 
-void SdfNode::updateOccupancyCallback() {
-    if (!md_.occ_need_update_) return;
-    
-    if (md_.latest_grid_ == nullptr) {
-        md_.occ_need_update_ = false;
-        return;
-    }
-    
-    // Update local bounds based on camera position and local update range
-    Eigen::Vector3d local_range_min = md_.camera_pos_ - mp_.local_update_range_;
-    Eigen::Vector3d local_range_max = md_.camera_pos_ + mp_.local_update_range_;
-
-        
-        // Clamp to map boundaries
-        for (int i = 0; i < 3; ++i) {
-            local_range_min(i) = std::max(local_range_min(i), mp_.map_min_boundary_(i));
-            local_range_max(i) = std::min(local_range_max(i), mp_.map_max_boundary_(i));
-        }
-        
-        // Additional clamping to grid boundaries for x,y coordinates
-        const double grid_origin_x = md_.latest_grid_->info.origin.position.x;
-        const double grid_origin_y = md_.latest_grid_->info.origin.position.y;
-        const double grid_res = md_.latest_grid_->info.resolution;
-        const double grid_max_x = grid_origin_x + md_.latest_grid_->info.width * grid_res;
-        const double grid_max_y = grid_origin_y + md_.latest_grid_->info.height * grid_res;
-        
-
-        
-        local_range_min(0) = std::max(local_range_min(0), grid_origin_x);
-        local_range_min(1) = std::max(local_range_min(1), grid_origin_y);
-        local_range_max(0) = std::min(local_range_max(0), grid_max_x);
-        local_range_max(1) = std::min(local_range_max(1), grid_max_y);
-        
-
-        
-        // Convert to indices
-        Eigen::Vector3i min_id, max_id;
-        posToIndex(local_range_min, min_id);
-        posToIndex(local_range_max, max_id);
-        
-        
-        
-        // Update local bounds
-        md_.local_bound_min_ = min_id;
-        md_.local_bound_max_ = max_id;
-        boundIndex(md_.local_bound_min_);
-        boundIndex(md_.local_bound_max_);
-        
-        
-        
-        md_.local_updated_ = true;
-    
-    // Clear and inflate local map
-    if (md_.local_updated_) {
-        clearAndInflateLocalMap();
-    }
-    
-    md_.occ_need_update_ = false;
-    md_.esdf_need_update_ = true;
-}
-
-void SdfNode::clearAndInflateLocalMap() {
-    if (!md_.latest_grid_) return;
-    
-    /*clear outside local*/
-    const int vec_margin = 5;
-    
-    Eigen::Vector3i min_cut = md_.local_bound_min_ -
-        Eigen::Vector3i(mp_.local_map_margin_, mp_.local_map_margin_, mp_.local_map_margin_);
-    Eigen::Vector3i max_cut = md_.local_bound_max_ +
-        Eigen::Vector3i(mp_.local_map_margin_, mp_.local_map_margin_, mp_.local_map_margin_);
-    boundIndex(min_cut);
-    boundIndex(max_cut);
-
-    Eigen::Vector3i min_cut_m = min_cut - Eigen::Vector3i(vec_margin, vec_margin, vec_margin);
-    Eigen::Vector3i max_cut_m = max_cut + Eigen::Vector3i(vec_margin, vec_margin, vec_margin);
-    boundIndex(min_cut_m);
-    boundIndex(max_cut_m);
-
-    // clear data outside the local range
-    for (int x = min_cut_m(0); x <= max_cut_m(0); ++x)
-        for (int y = min_cut_m(1); y <= max_cut_m(1); ++y) {
-
-            for (int z = min_cut_m(2); z < min_cut(2); ++z) {
-                int idx = toAddress(x, y, z);
-                md_.occupancy_buffer_[idx] = mp_.clamp_min_log_ - mp_.unknown_flag_;
-                md_.distance_buffer_all_[idx] = 10000;
-            }
-
-            for (int z = max_cut(2) + 1; z <= max_cut_m(2); ++z) {
-                int idx = toAddress(x, y, z);
-                md_.occupancy_buffer_[idx] = mp_.clamp_min_log_ - mp_.unknown_flag_;
-                md_.distance_buffer_all_[idx] = 10000;
-            }
-        }
-
-    for (int z = min_cut_m(2); z <= max_cut_m(2); ++z)
-        for (int x = min_cut_m(0); x <= max_cut_m(0); ++x) {
-
-            for (int y = min_cut_m(1); y < min_cut(1); ++y) {
-                int idx = toAddress(x, y, z);
-                md_.occupancy_buffer_[idx] = mp_.clamp_min_log_ - mp_.unknown_flag_;
-                md_.distance_buffer_all_[idx] = 10000;
-            }
-
-            for (int y = max_cut(1) + 1; y <= max_cut_m(1); ++y) {
-                int idx = toAddress(x, y, z);
-                md_.occupancy_buffer_[idx] = mp_.clamp_min_log_ - mp_.unknown_flag_;
-                md_.distance_buffer_all_[idx] = 10000;
-            }
-        }
-
-    for (int y = min_cut_m(1); y <= max_cut_m(1); ++y)
-        for (int z = min_cut_m(2); z <= max_cut_m(2); ++z) {
-
-            for (int x = min_cut_m(0); x < min_cut(0); ++x) {
-                int idx = toAddress(x, y, z);
-                md_.occupancy_buffer_[idx] = mp_.clamp_min_log_ - mp_.unknown_flag_;
-                md_.distance_buffer_all_[idx] = 10000;
-            }
-
-            for (int x = max_cut(0) + 1; x <= max_cut_m(0); ++x) {
-                int idx = toAddress(x, y, z);
-                md_.occupancy_buffer_[idx] = mp_.clamp_min_log_ - mp_.unknown_flag_;
-                md_.distance_buffer_all_[idx] = 10000;
-            }
-        }
-
-    // Extract grid parameters for cleaner code
-    const int width = md_.latest_grid_->info.width;
-    // const int height = md_.latest_grid_->info.height;
-    const double grid_res = md_.latest_grid_->info.resolution;
-    const double origin_x = md_.latest_grid_->info.origin.position.x;
-    const double origin_y = md_.latest_grid_->info.origin.position.y;
-    const std::vector<int8_t>& grid_data = md_.latest_grid_->data;
-    
-    // inflate occupied voxels to compensate robot size
-    int inf_step = ceil(mp_.obstacles_inflation_ / mp_.resolution_);
-    std::vector<Eigen::Vector3i> inf_pts(pow(2 * inf_step + 1, 3));
-    Eigen::Vector3i inf_pt;
-
-    // clear outdated data
-    for (int x = md_.local_bound_min_(0); x <= md_.local_bound_max_(0); ++x)
-        for (int y = md_.local_bound_min_(1); y <= md_.local_bound_max_(1); ++y)
-            for (int z = md_.local_bound_min_(2); z <= md_.local_bound_max_(2); ++z) {
-                md_.occupancy_buffer_inflate_[toAddress(x, y, z)] = 0;
-            }
-
-    // inflate obstacles - modified condition: check if latest_grid.data > 50
-    int buffer_size = mp_.map_voxel_num_(0) * mp_.map_voxel_num_(1) * mp_.map_voxel_num_(2);
-    for (int x = md_.local_bound_min_(0); x <= md_.local_bound_max_(0); ++x)
-        for (int y = md_.local_bound_min_(1); y <= md_.local_bound_max_(1); ++y)
-            for (int z = md_.local_bound_min_(2); z <= md_.local_bound_max_(2); ++z) {
-
-                // Convert 3D index to 2D grid index
-                Eigen::Vector3d pos;
-                indexToPos(Eigen::Vector3i(x, y, z), pos);
-                
-                // Convert world position to grid coordinates
-                int grid_x = static_cast<int>((pos(0) - origin_x) / grid_res);
-                int grid_y = static_cast<int>((pos(1) - origin_y) / grid_res);
-                
-                // No need to check bounds since local_bound_min/max already clamped to grid boundaries
-                int grid_idx = grid_y * width + grid_x;
-                
-                // Modified condition: check if grid data > 50 instead of buffer > log
-                if (grid_data[grid_idx] > 50) {
-                    // RCLCPP_INFO(this->get_logger(), "Inflate obstacle at (%d, %d, %d), grid_idx=%d", x, y, z, grid_idx);
-                    inflatePoint(Eigen::Vector3i(x, y, z), inf_step, inf_pts);
-                    for (int k = 0; k < static_cast<int>(inf_pts.size()); ++k) {
-                        inf_pt = inf_pts[k];
-                        int idx_inf = toAddress(inf_pt);
-                        if (idx_inf < 0 ||
-                            idx_inf >= buffer_size) {
-                            continue;
-                        }
-                        md_.occupancy_buffer_inflate_[idx_inf] = 1;
-            }
-        }
-    }
-}
 
 // Additional interface methods for EDTEnvironment compatibility
 void SdfNode::getSurroundPts(const Eigen::Vector3d& pos, Eigen::Vector3d pts[2][2][2], Eigen::Vector3d& diff) {

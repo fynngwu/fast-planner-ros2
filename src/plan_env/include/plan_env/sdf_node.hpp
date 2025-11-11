@@ -33,7 +33,6 @@ struct MappingParameters {
 
 // Mapping data
 struct MappingData {
-    std::vector<double> occupancy_buffer_;
     std::vector<char> occupancy_buffer_neg;
     std::vector<char> occupancy_buffer_inflate_;
     std::vector<double> distance_buffer_;
@@ -43,14 +42,12 @@ struct MappingData {
     std::vector<double> tmp_buffer2_;
     
     Eigen::Vector3i local_bound_min_, local_bound_max_;
-    Eigen::Vector3d camera_pos_;  // Camera/robot position for local update
     
+    nav_msgs::msg::OccupancyGrid::SharedPtr map1_grid_;
+    nav_msgs::msg::OccupancyGrid::SharedPtr map3_grid_;
+    Eigen::Vector3d camera_pos_;
+    bool has_odom_;
     bool esdf_need_update_;
-    bool local_updated_;  // Flag to indicate local update
-    bool occ_need_update_;  // Flag to indicate occupancy needs update
-    bool has_odom_;  // Flag to indicate odometry received
-    
-    nav_msgs::msg::OccupancyGrid::SharedPtr latest_grid_;  // Latest occupancy grid
     
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 };
@@ -73,6 +70,7 @@ public:
         Eigen::Vector3i idx;
         posToIndex(pos, idx);
         if (!isInMap(idx)) {
+            RCLCPP_INFO(this->get_logger(), "Position out of map bounds: [%.2f, %.2f, %.2f]", pos(0), pos(1), pos(2));
             return 0;  // Unknown
         }
         return md_.occupancy_buffer_inflate_[toAddress(idx)];
@@ -89,11 +87,11 @@ public:
 
 private:
     // Callbacks
-    void occupancyGridCallback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg);
+    void occupancyGridCallback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg, int map_index);
     void odomCallback(const nav_msgs::msg::Odometry::SharedPtr msg);
+    void rebuildStaticMap();
+    void inflateFromGrid(const nav_msgs::msg::OccupancyGrid& grid);
     void updateEsdfTimer();
-    void updateOccupancyCallback();
-    
     // Map management
     void initMap();
     inline void posToIndex(const Eigen::Vector3d& pos, Eigen::Vector3i& id);
@@ -105,7 +103,6 @@ private:
     inline void boundIndex(Eigen::Vector3i& id);
     
     // Inflation functions
-    void clearAndInflateLocalMap();
     inline void inflatePoint(const Eigen::Vector3i& pt, int step, std::vector<Eigen::Vector3i>& pts);
     
     // ESDF functions
@@ -121,13 +118,13 @@ private:
     MappingData md_;
     
     // ROS2 subscribers and publishers
-    rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr occupancy_grid_sub_;
+    rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr occupancy_grid_sub_map1_;
+    rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr occupancy_grid_sub_map3_;
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr esdf_pub_;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr map_inflate_pub_;
-    rclcpp::TimerBase::SharedPtr esdf_timer_;
     rclcpp::TimerBase::SharedPtr vis_timer_;
-    rclcpp::TimerBase::SharedPtr occ_timer_;
+    rclcpp::TimerBase::SharedPtr esdf_timer_;
     
     bool map_initialized_;
 };

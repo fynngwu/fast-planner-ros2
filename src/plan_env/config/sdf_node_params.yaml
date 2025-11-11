@@ -4,7 +4,7 @@ sdf_node:
     resolution: 0.05
     
     # Map size (meters)
-    map_size_x: 3.2
+    map_size_x: 12.0
     map_size_y: 6.0
     map_size_z: 0.01  # Back to 2D (single layer) for faster processing
     

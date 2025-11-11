@@ -1,0 +1,22 @@
+# Test files and outputs
+test/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# ROS2 specific
+install/
+build/
+log/
+
+# Shell scripts
+*.sh
+
+# Keep specific script tracked
+!kill_kfs_nodes.sh
+
+# Log files
+*.log

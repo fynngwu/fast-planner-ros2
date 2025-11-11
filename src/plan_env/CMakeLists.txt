@@ -56,16 +56,6 @@ ament_target_dependencies(sdf_node
 )
 
 
-# Executable: Odom Publisher (for testing)
-add_executable(odom_publisher
-  src/main_odom_publisher.cpp
-)
-
-ament_target_dependencies(odom_publisher
-  rclcpp
-  nav_msgs
-)
-
 # Install targets
 # Libraries should be installed to lib/ with EXPORT and INCLUDES DESTINATION
 # This allows other packages to use ament_target_dependencies to find headers
@@ -76,7 +66,7 @@ install(TARGETS ${PROJECT_NAME}
 )
 
 # Executables go to lib/${PROJECT_NAME}
-install(TARGETS sdf_node odom_publisher
+install(TARGETS sdf_node
   DESTINATION lib/${PROJECT_NAME}
 )
 

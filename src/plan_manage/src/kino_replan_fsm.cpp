@@ -2,7 +2,6 @@
 
 #include <cstdint>
 #include <geometry_msgs/msg/point.hpp>
-#include <nav_msgs/msg/path.hpp>
 #include <std_msgs/msg/empty.hpp>
 
 namespace fast_planner {
@@ -10,32 +9,13 @@ namespace fast_planner {
 void KinoReplanFSM::init(const rclcpp::Node::SharedPtr& node) {
   node_ = node;
 
-  current_wp_  = 0;
   exec_state_  = FSM_EXEC_STATE::INIT;
   have_target_ = false;
   have_odom_   = false;
   trigger_     = false;
 
-  target_type_      = node_->declare_parameter<int>("fsm.target_type", PRESET_TARGET);
   replan_thresh_    = node_->declare_parameter<double>("fsm.thresh_replan", 1.0);
   no_replan_thresh_ = node_->declare_parameter<double>("fsm.thresh_no_replan", 0.5);
-  waypoint_num_     = node_->declare_parameter<int>("fsm.waypoint_num", 0);
-
-  for (int i = 0; i < waypoint_num_; ++i) {
-    const std::string prefix = "fsm.waypoint" + std::to_string(i);
-    waypoints_[i][0] = node_->declare_parameter<double>(prefix + ".x", 0.0);
-    waypoints_[i][1] = node_->declare_parameter<double>(prefix + ".y", 0.0);
-    waypoints_[i][2] = node_->declare_parameter<double>(prefix + ".z", 1.0);
-    // 添加yaw角配置（可选）
-    double yaw = node_->declare_parameter<double>(prefix + ".yaw", std::numeric_limits<double>::quiet_NaN());
-    if (!std::isnan(yaw)) {
-      // 如果配置了yaw，可以存储到waypoints数组中，或者单独存储
-      // 这里暂时不实现，因为yaw规划是自动的
-    }
-  }
-  
-  // 添加全局目标yaw配置（可选）
-  end_yaw_ = node_->declare_parameter<double>("fsm.end_yaw", std::numeric_limits<double>::quiet_NaN());
 
   planner_manager_ = std::make_shared<FastPlannerManager>();
   planner_manager_->initPlanModules(node_);
@@ -46,9 +26,9 @@ void KinoReplanFSM::init(const rclcpp::Node::SharedPtr& node) {
   safety_timer_ = node_->create_wall_timer(
       std::chrono::milliseconds(50), std::bind(&KinoReplanFSM::checkCollisionCallback, this));
 
-  waypoint_sub_ = node_->create_subscription<nav_msgs::msg::Path>(
-      "waypoint_generator/waypoints", rclcpp::QoS(1),
-      std::bind(&KinoReplanFSM::waypointCallback, this, std::placeholders::_1));
+  goal_sub_ = node_->create_subscription<geometry_msgs::msg::PoseStamped>(
+      "goal_pose", rclcpp::QoS(1),
+      std::bind(&KinoReplanFSM::goalPoseCallback, this, std::placeholders::_1));
 
   odom_sub_ = node_->create_subscription<nav_msgs::msg::Odometry>(
       "odom_world", rclcpp::SensorDataQoS(),
@@ -59,25 +39,12 @@ void KinoReplanFSM::init(const rclcpp::Node::SharedPtr& node) {
   bspline_pub_ = node_->create_publisher<plan_manage::msg::Bspline>("planning/bspline", 10);
 }
 
-void KinoReplanFSM::waypointCallback(const nav_msgs::msg::Path::SharedPtr msg) {
-  if (msg->poses.empty()) {
-    return;
-  }
-
-  if (msg->poses.front().pose.position.z < -0.1) {
-    return;
-  }
-
+void KinoReplanFSM::goalPoseCallback(const geometry_msgs::msg::PoseStamped::SharedPtr msg) {
   trigger_ = true;
 
-  if (target_type_ == TARGET_TYPE::MANUAL_TARGET) {
-    end_pt_ << msg->poses.front().pose.position.x, msg->poses.front().pose.position.y, 1.0;
-  } else if (target_type_ == TARGET_TYPE::PRESET_TARGET && waypoint_num_ > 0) {
-    end_pt_(0)  = waypoints_[current_wp_][0];
-    end_pt_(1)  = waypoints_[current_wp_][1];
-    end_pt_(2)  = waypoints_[current_wp_][2];
-    current_wp_ = (current_wp_ + 1) % waypoint_num_;
-  }
+  end_pt_(0) = msg->pose.position.x;
+  end_pt_(1) = msg->pose.position.y;
+  end_pt_(2) = msg->pose.position.z;
 
   visualization_->drawGoal(end_pt_, 0.3, Eigen::Vector4d(1, 0, 0, 1.0));
   end_vel_.setZero();
@@ -105,27 +72,6 @@ void KinoReplanFSM::odometryCallback(const nav_msgs::msg::Odometry::SharedPtr ms
   odom_orient_.z() = msg->pose.pose.orientation.z;
 
   have_odom_ = true;
-
-  // For PRESET_TARGET mode, automatically set the first waypoint when odom is received
-  if (target_type_ == TARGET_TYPE::PRESET_TARGET && waypoint_num_ > 0 && !trigger_) {
-    end_pt_(0) = waypoints_[current_wp_][0];
-    end_pt_(1) = waypoints_[current_wp_][1];
-    end_pt_(2) = waypoints_[current_wp_][2];
-    have_target_ = true;
-    trigger_ = true;
-    visualization_->drawGoal(end_pt_, 0.3, Eigen::Vector4d(1, 0, 0, 1.0));
-    RCLCPP_INFO(node_->get_logger(), "Auto-set preset waypoint %d: [%.2f, %.2f, %.2f]", 
-                current_wp_, end_pt_(0), end_pt_(1), end_pt_(2));
-  }
-  
-  // 定期打印当前目标点坐标
-  if (have_target_) {
-    RCLCPP_INFO_THROTTLE(node_->get_logger(), *node_->get_clock(), 1000, 
-                         "Current target: [%.2f, %.2f, %.2f], Current position: [%.2f, %.2f, %.2f], Distance: %.2f", 
-                         end_pt_(0), end_pt_(1), end_pt_(2), 
-                         odom_pos_(0), odom_pos_(1), odom_pos_(2),
-                         (end_pt_ - odom_pos_).norm());
-  }
 }
 
 void KinoReplanFSM::changeFSMExecState(FSM_EXEC_STATE new_state, const std::string& pos_call) {
@@ -174,36 +120,6 @@ void KinoReplanFSM::execFSMCallback() {
     }
 
     case GEN_NEW_TRAJ: {
-      if (!have_target_) {
-        RCLCPP_WARN_THROTTLE(node_->get_logger(), *node_->get_clock(), 1000,
-                             "GEN_NEW_TRAJ: No target set, waiting...");
-        changeFSMExecState(WAIT_TARGET, "FSM");
-        return;
-      }
-      
-      // Check if already at target (avoid planning when start == goal)
-      if ((odom_pos_ - end_pt_).norm() < no_replan_thresh_) {
-        // Already at target, move to next waypoint
-        if (target_type_ == TARGET_TYPE::PRESET_TARGET && waypoint_num_ > 0) {
-          current_wp_ = (current_wp_ + 1) % waypoint_num_;
-          end_pt_(0) = waypoints_[current_wp_][0];
-          end_pt_(1) = waypoints_[current_wp_][1];
-          end_pt_(2) = waypoints_[current_wp_][2];
-          have_target_ = true;
-          trigger_ = true;
-          visualization_->drawGoal(end_pt_, 0.3, Eigen::Vector4d(1, 0, 0, 1.0));
-          RCLCPP_INFO(node_->get_logger(), "Already at waypoint, moving to next preset waypoint %d: [%.2f, %.2f, %.2f]", 
-                      current_wp_, end_pt_(0), end_pt_(1), end_pt_(2));
-          // Continue to plan to new waypoint
-        } else {
-          // Manual target mode, wait for new target
-          have_target_ = false;
-          changeFSMExecState(WAIT_TARGET, "FSM");
-          return;
-        }
-      }
-      
-      // Use current odometry position as start
       start_pt_  = odom_pos_;
       start_vel_ = odom_vel_;
       start_acc_.setZero();
@@ -236,44 +152,13 @@ void KinoReplanFSM::execFSMCallback() {
       auto  pos    = info->position_traj_.evaluateDeBoorT(t_now);
 
       if (t_now > info->duration_ - 1e-2) {
-        // Trajectory finished
-        if (target_type_ == TARGET_TYPE::PRESET_TARGET && waypoint_num_ > 0) {
-          // Move to next waypoint - 修改为循环逻辑
-          current_wp_ = (current_wp_ + 1) % waypoint_num_;
-          
-          // 设置下一个waypoint（循环执行，不会停止）
-          end_pt_(0) = waypoints_[current_wp_][0];
-          end_pt_(1) = waypoints_[current_wp_][1];
-          end_pt_(2) = waypoints_[current_wp_][2];
-          have_target_ = true;
-          trigger_ = true;
-          visualization_->drawGoal(end_pt_, 0.3, Eigen::Vector4d(1, 0, 0, 1.0));
-          RCLCPP_INFO(node_->get_logger(), "Moving to next preset waypoint %d: [%.2f, %.2f, %.2f]", 
-                      current_wp_, end_pt_(0), end_pt_(1), end_pt_(2));
-          changeFSMExecState(GEN_NEW_TRAJ, "FSM");
-        } else {
-          // Manual target mode, wait for new target
-          have_target_ = false;
-          changeFSMExecState(WAIT_TARGET, "FSM");
-        }
+        have_target_ = false;
+        changeFSMExecState(WAIT_TARGET, "FSM");
         return;
       }
 
       // Check if reached target waypoint
       if ((end_pt_ - pos).norm() < no_replan_thresh_) {
-        // Reached current waypoint, move to next
-        if (target_type_ == TARGET_TYPE::PRESET_TARGET && waypoint_num_ > 0) {
-          current_wp_ = (current_wp_ + 1) % waypoint_num_;
-          end_pt_(0) = waypoints_[current_wp_][0];
-          end_pt_(1) = waypoints_[current_wp_][1];
-          end_pt_(2) = waypoints_[current_wp_][2];
-          have_target_ = true;
-          trigger_ = true;
-          visualization_->drawGoal(end_pt_, 0.3, Eigen::Vector4d(1, 0, 0, 1.0));
-          RCLCPP_INFO(node_->get_logger(), "Reached waypoint, moving to next preset waypoint %d: [%.2f, %.2f, %.2f]", 
-                      current_wp_, end_pt_(0), end_pt_(1), end_pt_(2));
-          changeFSMExecState(GEN_NEW_TRAJ, "FSM");
-        }
         return;
       }
 
