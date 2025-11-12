@@ -207,41 +207,55 @@ bool FastPlannerManager::kinodynamicReplan(Eigen::Vector3d start_pt, Eigen::Vect
   return true;
 }
 
-void FastPlannerManager::planYaw(const Eigen::Vector3d& start_yaw) {
-  if (bspline_optimizers_.size() < 2 || !bspline_optimizers_[1]) {
-    RCLCPP_WARN(logger_, "Yaw optimizer not initialized");
-    return;
-  }
-
+void FastPlannerManager::planYaw(const Eigen::Vector3d& start_yaw, const double target_yaw) {
   auto t1 = node_->now();
 
   auto& pos      = local_data_.position_traj_;
   double duration = pos.getTimeSum();
 
-  double dt_yaw = std::max(0.1, std::min(0.3, duration / 10.0));
-  int    seg_num = std::max(3, static_cast<int>(std::ceil(duration / dt_yaw)));
+  double dt_yaw  = 0.3;
+  int    seg_num = static_cast<int>(std::ceil(duration / dt_yaw));
   dt_yaw         = duration / seg_num;
 
   const double forward_t = 2.0;
+  const double transition_time = 2.0;  // Last 2 seconds transition to target yaw
+  bool has_target_yaw = !std::isnan(target_yaw);
+  double target_yaw_processed = target_yaw;
+  if (has_target_yaw) {
+    calcNextYaw(start_yaw(0), target_yaw_processed);  // Handle angle continuity
+  }
+  
   double       last_yaw  = start_yaw(0);
   std::vector<Eigen::Vector3d> waypts;
   std::vector<int>             waypt_idx;
 
   for (int i = 0; i < seg_num; ++i) {
     double          tc = i * dt_yaw;
-    Eigen::Vector3d pc = pos.evaluateDeBoorT(tc);
-    double          tf = std::min(duration, tc + forward_t);
-    Eigen::Vector3d pf = pos.evaluateDeBoorT(tf);
-    Eigen::Vector3d pd = pf - pc;
-
-    Eigen::Vector3d waypt = Eigen::Vector3d::Zero();
-    if (pd.norm() > 1e-6) {
-      waypt(0) = std::atan2(pd(1), pd(0));
-      calcNextYaw(last_yaw, waypt(0));
+    double remaining_time = duration - tc;
+    
+    Eigen::Vector3d waypt;
+    
+    // If close to end and has target yaw, use target yaw for waypoints
+    if (has_target_yaw && remaining_time <= transition_time) {
+      waypt(0) = target_yaw_processed;
       waypt(1) = waypt(2) = 0.0;
+      calcNextYaw(last_yaw, waypt(0));
       last_yaw = waypt(0);
-    } else if (!waypts.empty()) {
-      waypt = waypts.back();
+    } else {
+      // Normal case: use forward-looking direction
+      Eigen::Vector3d pc = pos.evaluateDeBoorT(tc);
+      double          tf = std::min(duration, tc + forward_t);
+      Eigen::Vector3d pf = pos.evaluateDeBoorT(tf);
+      Eigen::Vector3d pd = pf - pc;
+
+      if (pd.norm() > 1e-6) {
+        waypt(0) = std::atan2(pd(1), pd(0));
+        waypt(1) = waypt(2) = 0.0;
+        calcNextYaw(last_yaw, waypt(0));
+        last_yaw = waypt(0);
+      } else {
+        waypt = waypts.empty() ? Eigen::Vector3d(last_yaw, 0, 0) : waypts.back();
+      }
     }
 
     waypts.push_back(waypt);
@@ -256,9 +270,17 @@ void FastPlannerManager::planYaw(const Eigen::Vector3d& start_yaw) {
       -(1 / 6.0) * dt_yaw * dt_yaw, 1.0, dt_yaw, (1 / 3.0) * dt_yaw * dt_yaw;
   yaw.block(0, 0, 3, 1) = states2pts * start_yaw;
 
-  Eigen::Vector3d end_v = local_data_.velocity_traj_.evaluateDeBoorT(std::max(0.0, duration - 0.1));
-  Eigen::Vector3d end_yaw(std::atan2(end_v(1), end_v(0)), 0.0, 0.0);
-  calcNextYaw(last_yaw, end_yaw(0));
+  // Calculate end_yaw: use target_yaw if provided, otherwise use velocity direction
+  Eigen::Vector3d end_yaw;
+  if (has_target_yaw) {
+    // Use target yaw if provided
+    end_yaw = Eigen::Vector3d(target_yaw_processed, 0.0, 0.0);
+  } else {
+    // Use velocity direction (original logic)
+    Eigen::Vector3d end_v = local_data_.velocity_traj_.evaluateDeBoorT(std::max(0.0, duration - 0.1));
+    end_yaw = Eigen::Vector3d(std::atan2(end_v(1), end_v(0)), 0.0, 0.0);
+    calcNextYaw(last_yaw, end_yaw(0));
+  }
   yaw.block(seg_num, 0, 3, 1) = states2pts * end_yaw;
 
   bspline_optimizers_[1]->setWaypoints(waypts, waypt_idx);

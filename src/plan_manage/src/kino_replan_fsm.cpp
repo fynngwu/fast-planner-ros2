@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <geometry_msgs/msg/point.hpp>
+#include <limits>
 #include <std_msgs/msg/empty.hpp>
 
 namespace fast_planner {
@@ -45,6 +46,17 @@ void KinoReplanFSM::goalPoseCallback(const geometry_msgs::msg::PoseStamped::Shar
   end_pt_(0) = msg->pose.position.x;
   end_pt_(1) = msg->pose.position.y;
   end_pt_(2) = msg->pose.position.z;
+
+  // Extract target yaw from orientation
+  Eigen::Quaterniond goal_orient(
+    msg->pose.orientation.w,
+    msg->pose.orientation.x,
+    msg->pose.orientation.y,
+    msg->pose.orientation.z
+  );
+  Eigen::Matrix3d rot_mat = goal_orient.toRotationMatrix();
+  Eigen::Vector3d rot_x = rot_mat.block<3, 1>(0, 0);
+  end_yaw_ = std::atan2(rot_x(1), rot_x(0));
 
   visualization_->drawGoal(end_pt_, 0.3, Eigen::Vector4d(1, 0, 0, 1.0));
   end_vel_.setZero();
@@ -232,7 +244,12 @@ bool KinoReplanFSM::callKinodynamicReplan() {
     return false;
   }
 
-  planner_manager_->planYaw(start_yaw_);
+  // Use target yaw if available, otherwise use NaN (default to velocity direction)
+  double target_yaw = std::numeric_limits<double>::quiet_NaN();
+  if (have_target_) {
+    target_yaw = end_yaw_;
+  }
+  planner_manager_->planYaw(start_yaw_, target_yaw);
   auto info = &planner_manager_->local_data_;
 
   plan_manage::msg::Bspline bspline_msg;

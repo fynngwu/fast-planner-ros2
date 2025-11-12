@@ -33,6 +33,7 @@
 #include <plan_manage/plan_container.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <vector>
+#include <limits>
 
 namespace fast_planner {
 
@@ -48,7 +49,7 @@ public:
 
   bool kinodynamicReplan(Eigen::Vector3d start_pt, Eigen::Vector3d start_vel, Eigen::Vector3d start_acc,
                          Eigen::Vector3d end_pt, Eigen::Vector3d end_vel);
-  void planYaw(const Eigen::Vector3d& start_yaw);
+  void planYaw(const Eigen::Vector3d& start_yaw, const double target_yaw = std::numeric_limits<double>::quiet_NaN());
   bool checkTrajCollision(double& distance);
 
   PlanParameters          pp_;
