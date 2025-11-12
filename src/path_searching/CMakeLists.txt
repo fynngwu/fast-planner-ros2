@@ -40,7 +40,9 @@ install(TARGETS ${PROJECT_NAME}
 install(DIRECTORY include/
   DESTINATION include/
 )
-
+install(DIRECTORY launch
+  DESTINATION share/${PROJECT_NAME}
+)
 # Export include directories explicitly
 # This ensures other packages can use #include <path_searching/xxx.h>
 ament_export_include_directories(include)
@@ -59,5 +61,15 @@ if(BUILD_TESTING)
   set(ament_cmake_cpplint_FOUND TRUE)
   ament_lint_auto_find_test_dependencies()
 endif()
+
+# Install Python scripts to lib/${PROJECT_NAME}
+install(PROGRAMS
+  path_searching/astar_planner_node.py
+  path_searching/omnidirectional_tracker_node.py
+  path_searching/path_decision_node.py
+  path_searching/pure_pursuit_node.py
+  path_searching/odom_simulator.py
+  DESTINATION lib/${PROJECT_NAME}
+)
 
 ament_package()
